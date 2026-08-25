@@ -383,15 +383,22 @@ func parseToxin(t ToxinInput, sc catalog.Scales) (store.ToxinRecord, error) {
 	return tr, nil
 }
 
+// deriveToxin fills the derived PSP/DSP fields using the plate-reader
+// calibration (raw * factor) / divisor. It delegates to ledger.DeriveScaled so
+// that the divide-by-zero and multiply-overflow checks run: an overflowing
+// calibration surfaces FIXED_POINT_OVERFLOW instead of silently wrapping into a
+// negative concentration, which would otherwise be persisted as valid evidence.
 func deriveToxin(tr *store.ToxinRecord, factor, divisor int64) error {
-	if factor == 0 {
-		factor = 1
+	psp, err := ledger.DeriveScaled(tr.PSPRaw, factor, divisor)
+	if err != nil {
+		return err
 	}
-	if divisor == 0 {
-		divisor = 1
+	dsp, err := ledger.DeriveScaled(tr.DSPRaw, factor, divisor)
+	if err != nil {
+		return err
 	}
-	tr.PSP = tr.PSPRaw * factor / divisor
-	tr.DSP = tr.DSPRaw * factor / divisor
+	tr.PSP = psp
+	tr.DSP = dsp
 	return nil
 }
 
