@@ -29,12 +29,19 @@ func holeLeaseKind(kind string) string {
 // StartDeviceCall initiates a qPCR or incubator call for a hole. It persists a
 // pending call, runs the instrument outside any transaction, then appends the
 // result. Instrument failures are recorded as retryable, never as hard errors.
+//
+// Re-submitting a start for the same hole/generation does not re-drive the
+// instrument: a finished call replays its stable result and a pending or
+// failed call surfaces DEVICE_RETRY_PENDING so the caller resumes it through
+// the retry endpoint, which computes the correct next attempt number. This
+// keeps device_attempts' (call_id, attempt) uniqueness intact across retries.
 func (s *Service) StartDeviceCall(ctx context.Context, id domain.TaskID, opID string, generation domain.Generation, req DeviceCallRequest) (*DeviceCallResponse, error) {
 	if req.Kind != "qpcr" && req.Kind != "incubator" {
 		return nil, &domain.APIError{Code: domain.CodeCoverageInvalid, Message: "device kind must be qpcr or incubator"}
 	}
 
 	var callID int64
+	var existing *store.DeviceCallRecord
 	err := s.store.Tx(ctx, func(tx *store.Tx) error {
 		rec, replay, err := s.gate(ctx, tx, id, generation, opID, requestDigest(req))
 		if err != nil {
@@ -46,10 +53,10 @@ func (s *Service) StartDeviceCall(ctx context.Context, id domain.TaskID, opID st
 		if rec.Status != "pathogen_retesting" {
 			return &domain.APIError{Code: domain.CodeTerminalState, Message: "task is not retesting pathogens"}
 		}
-		existing, err := tx.GetDeviceCall(ctx, id, req.Kind, req.Hole, int64(generation))
+		existing, err = tx.GetDeviceCall(ctx, id, req.Kind, req.Hole, int64(generation))
 		if err == nil {
 			callID = existing.ID
-			return nil // already created; resume below
+			return nil // already created; surface stable state below
 		}
 		if !store.IsNotFound(err) {
 			return err
@@ -64,6 +71,23 @@ func (s *Service) StartDeviceCall(ctx context.Context, id domain.TaskID, opID st
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	// A prior start already created this call: do not re-drive the instrument
+	// at attempt 1, which would collide with the persisted device_attempts row
+	// and surface as an internal error. Instead return the call's stable state.
+	if existing != nil {
+		resp := &DeviceCallResponse{CallID: callID, Hole: existing.Hole, Kind: existing.Kind}
+		switch existing.Status {
+		case "success":
+			resp.Status = "success"
+			return resp, nil
+		default: // pending | failed
+			return nil, &domain.APIError{
+				Code:    domain.CodeDeviceRetryPending,
+				Message: "device call already in progress for this hole; use the retry endpoint",
+			}
+		}
 	}
 
 	resp, err := s.runDeviceCall(ctx, callID, 1)
