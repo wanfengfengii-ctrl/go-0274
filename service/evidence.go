@@ -84,12 +84,30 @@ func (s *Service) SealSamples(ctx context.Context, id domain.TaskID, opID string
 				if err != nil {
 					return &domain.APIError{Code: domain.CodeDuplicateBlindCode, Message: "unknown blind code: " + code}
 				}
-				if bc.SampleID != "" {
-					return &domain.APIError{Code: domain.CodeDuplicateBlindCode, Message: "blind code already bound or foreign: " + code}
+				// The code must belong to this task. A cross-batch mis-scan of
+				// another open task's blind code is rejected here rather than
+				// silently ignored; otherwise this task advances on an unbound
+				// code and the sample mapping breaks at reveal.
+				if bc.TaskID != id {
+					return &domain.APIError{Code: domain.CodeDuplicateBlindCode, Message: "blind code belongs to another task: " + code}
 				}
-				if _, err := tx.ExecContext(ctx, `UPDATE blind_codes SET sample_id = ? WHERE code = ? AND task_id = ? AND sample_id = ''`,
-					sampleID, code, id); err != nil {
+				if bc.SampleID != "" {
+					return &domain.APIError{Code: domain.CodeDuplicateBlindCode, Message: "blind code already bound: " + code}
+				}
+				// Claim the code with a conditional update. Exactly one row must
+				// move; zero means a concurrent binding won it and this task must
+				// not proceed to resources_busy on a code it never bound.
+				res, err := tx.ExecContext(ctx, `UPDATE blind_codes SET sample_id = ? WHERE code = ? AND task_id = ? AND sample_id = ''`,
+					sampleID, code, id)
+				if err != nil {
 					return err
+				}
+				n, err := res.RowsAffected()
+				if err != nil {
+					return err
+				}
+				if n != 1 {
+					return &domain.APIError{Code: domain.CodeDuplicateBlindCode, Message: "blind code already bound: " + code}
 				}
 			}
 			if err := ledger.ValidateTriplicate(samples); err != nil {
