@@ -246,11 +246,36 @@ func (t *Tx) ListSamplesByTask(ctx context.Context, taskID domain.TaskID) ([]Sam
 }
 
 // InsertBlindCode binds a blind code to a sample. The partial unique index on
-// unrevealed codes enforces global uniqueness across open tasks.
+// unrevealed codes enforces global uniqueness across open tasks for codes that
+// have not yet been revealed. It does not, and cannot, protect a code that was
+// revealed on a still-open (non-terminal) task, because revealing lifts the
+// code out of the index without the task being done. BlindCodeHeldByOpenTask
+// closes that gap and is checked by the lock path inside the same transaction.
 func (t *Tx) InsertBlindCode(ctx context.Context, r BlindCodeRecord) error {
 	_, err := t.ExecContext(ctx, `INSERT INTO blind_codes (task_id, code, sample_id, revealed) VALUES (?, ?, ?, ?)`,
 		r.TaskID, r.Code, r.SampleID, boolInt(r.Revealed))
 	return err
+}
+
+// BlindCodeHeldByOpenTask reports whether code is already bound to any task
+// that has not reached a terminal state, excluding excludeTaskID (the task
+// currently being locked). The partial index idx_blind_codes_open only guards
+// unrevealed codes; this check enforces the documented "开放任务盲码唯一"
+// invariant for a code that was revealed on a still-open task, which the index
+// no longer covers. It runs inside the lock transaction, so it is race-free
+// under the store's single-writer serialization — the same check-then-insert
+// discipline the terminal decision uses.
+func (t *Tx) BlindCodeHeldByOpenTask(ctx context.Context, code string, excludeTaskID domain.TaskID) (bool, error) {
+	var exists int
+	err := t.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM blind_codes bc
+			JOIN release_tasks rt ON rt.id = bc.task_id
+			WHERE bc.code = ? AND bc.task_id <> ? AND rt.status NOT IN ('released','isolated','cancelled'))`,
+		code, excludeTaskID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists != 0, nil
 }
 
 // GetBlindCode loads a blind code by its code value.

@@ -98,7 +98,23 @@ func (s *Service) LockTask(ctx context.Context, id domain.TaskID, opID string, g
 			}
 		}
 		for _, code := range req.BlindCodes {
+			// The partial index idx_blind_codes_open only guards codes that are
+			// still unrevealed. A code revealed on a still-open (non-terminal)
+			// task falls out of that index, so it must be checked here, inside the
+			// lock transaction, against every open task. This enforces the
+			// documented "开放任务盲码唯一" invariant: a blind code is held by at
+			// most one open task even after an authorized reveal.
+			held, err := tx.BlindCodeHeldByOpenTask(ctx, code, id)
+			if err != nil {
+				return err
+			}
+			if held {
+				return &domain.APIError{Code: domain.CodeDuplicateBlindCode, Message: "blind code already held by an open task: " + code}
+			}
 			if err := tx.InsertBlindCode(ctx, store.BlindCodeRecord{TaskID: id, Code: code}); err != nil {
+				if store.IsUniqueViolation(err) {
+					return &domain.APIError{Code: domain.CodeDuplicateBlindCode, Message: "duplicate blind code: " + code}
+				}
 				return err
 			}
 		}
