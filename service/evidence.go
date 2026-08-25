@@ -241,37 +241,28 @@ func (s *Service) SubmitWater(ctx context.Context, id domain.TaskID, opID string
 
 // SubmitToxin records plate-reader toxin evidence, deriving concentrations in
 // integer arithmetic, and advances into pathogen retesting once every toxin
-// hole has a reading.
+// hole has a reading. The whole batch runs in one transaction so a malformed
+// reading in the middle rolls back every prior reading in the same batch,
+// leaving no half-batch of toxin evidence for a corrected retry to collide
+// with.
 func (s *Service) SubmitToxin(ctx context.Context, id domain.TaskID, opID string, generation domain.Generation, req ToxinRequest) error {
 	digest := requestDigest(req)
-	var snap catalog.RuleSnapshot
-	var replay bool
-	if err := s.store.Tx(ctx, func(tx *store.Tx) error {
-		rec, isReplay, err := s.gate(ctx, tx, id, generation, opID, digest)
+	return s.store.Tx(ctx, func(tx *store.Tx) error {
+		rec, replay, err := s.gate(ctx, tx, id, generation, opID, digest)
 		if err != nil {
 			return err
 		}
-		if isReplay {
-			replay = true
+		if replay {
 			return nil
 		}
 		if rec.Status != "toxin_verifying" {
 			return &domain.APIError{Code: domain.CodeTerminalState, Message: "task is not verifying toxins"}
 		}
-		var ok bool
-		snap, ok = s.snapshotFor(rec)
+		snap, ok := s.snapshotFor(rec)
 		if !ok {
 			return &domain.APIError{Code: domain.CodeStaleRuleDigest, Message: "unknown rule snapshot"}
 		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	if replay {
-		return nil
-	}
-	for _, t := range req.Readings {
-		if err := s.store.Tx(ctx, func(tx *store.Tx) error {
+		for _, t := range req.Readings {
 			tr, err := parseToxin(t, snap.Scales)
 			if err != nil {
 				return err
@@ -283,12 +274,7 @@ func (s *Service) SubmitToxin(ctx context.Context, id domain.TaskID, opID string
 			if err := s.evaluateToxin(ctx, tx, id, snap, tr); err != nil {
 				return err
 			}
-			return nil
-		}); err != nil {
-			return err
 		}
-	}
-	return s.store.Tx(ctx, func(tx *store.Tx) error {
 		// Advance once every toxin hole has a reading.
 		closed, err := s.toxinClosed(ctx, tx, id)
 		if err != nil {
