@@ -35,12 +35,26 @@ func (s *Service) StartDeviceCall(ctx context.Context, id domain.TaskID, opID st
 	}
 
 	var callID int64
+	var replayed *DeviceCallResponse
 	err := s.store.Tx(ctx, func(tx *store.Tx) error {
 		rec, replay, err := s.gate(ctx, tx, id, generation, opID, requestDigest(req))
 		if err != nil {
 			return err
 		}
 		if replay {
+			// Idempotent replay: the first invocation already created the
+			// device call and recorded its receipt in one transaction, so the
+			// call row is guaranteed to exist. Return its persisted stable
+			// result instead of re-running the instrument: replaying must not
+			// consume another scripted outcome or append a second attempt that
+			// could duplicate evidence.
+			existing, err := tx.GetDeviceCall(ctx, id, req.Kind, req.Hole, int64(generation))
+			if err != nil {
+				return err
+			}
+			replayed = &DeviceCallResponse{
+				CallID: existing.ID, Status: existing.Status, Hole: existing.Hole, Kind: existing.Kind,
+			}
 			return nil
 		}
 		if rec.Status != "pathogen_retesting" {
@@ -64,6 +78,9 @@ func (s *Service) StartDeviceCall(ctx context.Context, id domain.TaskID, opID st
 	})
 	if err != nil {
 		return nil, err
+	}
+	if replayed != nil {
+		return replayed, nil
 	}
 
 	resp, err := s.runDeviceCall(ctx, callID, 1)
