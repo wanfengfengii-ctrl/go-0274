@@ -184,7 +184,7 @@ CREATE TABLE IF NOT EXISTS pathogen_evidence_versions (
     coliform     INTEGER NOT NULL,
     version      INTEGER NOT NULL,
     valid        INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (task_id, hole, version)
+    PRIMARY KEY (task_id, hole, kind, version)
 );
 
 CREATE TABLE IF NOT EXISTS recheck_batches (

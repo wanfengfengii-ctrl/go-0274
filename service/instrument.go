@@ -249,32 +249,54 @@ func parsePathogen(kind string, payload []byte, sc catalog.Scales) (store.Pathog
 
 func (s *Service) defaultScales() catalog.Scales { return catalog.DefaultScales() }
 
-// pathogenClosed reports whether every qPCR and culture hole has evidence.
+// pathogenClosed reports whether every qPCR and culture hole has evidence of
+// its own kind. A single physical hole leased for both qPCR and culture must
+// produce both a qPCR and an incubator result before the task may advance: the
+// closure is keyed by (lease kind, hole), not by hole alone, so completing only
+// one device kind never satisfies the other.
 func (s *Service) pathogenClosed(ctx context.Context, tx *store.Tx, taskID domain.TaskID) (bool, error) {
 	leases, err := tx.ListLeasesByTask(ctx, taskID)
 	if err != nil {
 		return false, err
 	}
-	pathogenHoles := map[string]bool{}
+	// required maps a (lease kind, hole) pair to the evidence kind that must
+	// cover it: qpcr_hole -> qpcr, culture_hole -> incubator.
+	required := map[string]map[string]bool{} // kind -> set of holes
 	for _, l := range leases {
-		if l.Kind == "qpcr_hole" || l.Kind == "culture_hole" {
-			pathogenHoles[l.ResourceKey] = true
+		var evKind string
+		switch l.Kind {
+		case "qpcr_hole":
+			evKind = "qpcr"
+		case "culture_hole":
+			evKind = "incubator"
+		default:
+			continue
 		}
+		if required[evKind] == nil {
+			required[evKind] = map[string]bool{}
+		}
+		required[evKind][l.ResourceKey] = true
 	}
-	if len(pathogenHoles) == 0 {
+	if len(required) == 0 {
 		return true, nil
 	}
 	evidence, err := tx.ListPathogen(ctx, taskID)
 	if err != nil {
 		return false, err
 	}
-	seen := map[string]bool{}
+	// covered tracks which (evidence kind, hole) pairs have a valid row.
+	covered := map[string]map[string]bool{} // kind -> set of holes
 	for _, e := range evidence {
-		seen[e.Hole] = true
+		if covered[e.Kind] == nil {
+			covered[e.Kind] = map[string]bool{}
+		}
+		covered[e.Kind][e.Hole] = true
 	}
-	for h := range pathogenHoles {
-		if !seen[h] {
-			return false, nil
+	for evKind, holes := range required {
+		for h := range holes {
+			if !covered[evKind][h] {
+				return false, nil
+			}
 		}
 	}
 	return true, nil

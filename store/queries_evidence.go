@@ -185,7 +185,7 @@ func (t *Tx) InsertPathogen(ctx context.Context, r PathogenRecord) error {
 // ListPathogen returns pathogen evidence versions for a task.
 func (t *Tx) ListPathogen(ctx context.Context, taskID domain.TaskID) ([]PathogenRecord, error) {
 	rows, err := t.QueryContext(ctx, `SELECT task_id, generation, hole, kind, norovirus_ct, coliform, version, valid
-		FROM pathogen_evidence_versions WHERE task_id = ? ORDER BY hole, version`, taskID)
+		FROM pathogen_evidence_versions WHERE task_id = ? ORDER BY hole, kind, version`, taskID)
 	if err != nil {
 		return nil, err
 	}
