@@ -28,7 +28,8 @@ func mustAdvance(t *testing.T, svc *Service, id domain.TaskID) {
 }
 
 func TestDeviceRetryDeterministic(t *testing.T) {
-	st, err := store.Open(context.Background(), ":memory:", domain.FixedClock(0))
+	clock := domain.NewSteppingClock(0, 1)
+	st, err := store.Open(context.Background(), ":memory:", clock)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -49,7 +50,30 @@ func TestDeviceRetryDeterministic(t *testing.T) {
 	if resp.Status != "failed" {
 		t.Fatalf("expected first call to fail, got %s", resp.Status)
 	}
-	// First retry: disconnected.
+
+	// A retry before the scheduled logical next_retry is gated and must not
+	// re-run the instrument: the first failure scheduled next_retry at 1 while
+	// the clock is still at 0.
+	respPending, err := svc.RetryDeviceCall(context.Background(), resp.CallID)
+	if err == nil {
+		t.Fatalf("expected early retry to be gated, got status %s", respPending.Status)
+	}
+	var apiErr *domain.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != domain.CodeDeviceRetryPending {
+		t.Fatalf("expected DEVICE_RETRY_PENDING before retry time, got %v", err)
+	}
+	// No new attempt must have been recorded by the gated retry.
+	var attemptsAfterGate int
+	_ = st.Tx(context.Background(), func(tx *store.Tx) error {
+		row := tx.QueryRowContext(context.Background(), `SELECT attempts FROM device_calls WHERE id = ?`, resp.CallID)
+		return row.Scan(&attemptsAfterGate)
+	})
+	if attemptsAfterGate != 1 {
+		t.Fatalf("gated retry must not run the device, expected 1 attempt, got %d", attemptsAfterGate)
+	}
+
+	// Advance the clock to the scheduled retry time and retry: disconnected.
+	clock.SetTime(1)
 	resp, err = svc.RetryDeviceCall(context.Background(), resp.CallID)
 	if err != nil {
 		t.Fatalf("retry 1: %v", err)
@@ -57,7 +81,8 @@ func TestDeviceRetryDeterministic(t *testing.T) {
 	if resp.Status != "failed" {
 		t.Fatalf("expected retry 1 to fail, got %s", resp.Status)
 	}
-	// Second retry: success.
+	// Second retry: advance the clock past the new backoff and succeed.
+	clock.SetTime(3)
 	resp, err = svc.RetryDeviceCall(context.Background(), resp.CallID)
 	if err != nil {
 		t.Fatalf("retry 2: %v", err)

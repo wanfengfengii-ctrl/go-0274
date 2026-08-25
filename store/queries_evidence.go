@@ -164,6 +164,19 @@ func (t *Tx) ListPendingDeviceCalls(ctx context.Context, now int64) ([]DeviceCal
 	return out, rows.Err()
 }
 
+// GetDeviceAttempt loads one attempt of a device call, or sql.ErrNoRows when
+// no attempt was recorded for that (call, attempt) pair. The next_retry value
+// it carries is the deterministic time at which the next retry may run.
+func (t *Tx) GetDeviceAttempt(ctx context.Context, callID int64, attempt int) (*DeviceAttemptRecord, error) {
+	row := t.QueryRowContext(ctx, `SELECT call_id, attempt, category, next_retry, summary
+		FROM device_attempts WHERE call_id = ? AND attempt = ?`, callID, attempt)
+	var r DeviceAttemptRecord
+	if err := row.Scan(&r.CallID, &r.Attempt, &r.Category, &r.NextRetry, &r.Summary); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
 // InsertDeviceAttempt appends one attempt (success or failure) of a device call.
 func (t *Tx) InsertDeviceAttempt(ctx context.Context, r DeviceAttemptRecord) error {
 	_, err := t.ExecContext(ctx, `INSERT INTO device_attempts (call_id, attempt, category, next_retry, summary) VALUES (?, ?, ?, ?, ?)`,

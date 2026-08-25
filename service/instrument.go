@@ -169,7 +169,11 @@ func (s *Service) runDeviceCall(ctx context.Context, callID int64, attempt int) 
 	return resp, nil
 }
 
-// RetryDeviceCall re-runs a previously failed device call.
+// RetryDeviceCall re-runs a previously failed device call, but only once the
+// deterministic retry time recorded for the last attempt has arrived. A retry
+// that arrives early is rejected as DEVICE_RETRY_PENDING rather than re-running
+// the instrument ahead of schedule, which would let a successful payload advance
+// the task into review before its backoff elapsed.
 func (s *Service) RetryDeviceCall(ctx context.Context, callID int64) (*DeviceCallResponse, error) {
 	var attempts int
 	err := s.store.Tx(ctx, func(tx *store.Tx) error {
@@ -180,6 +184,18 @@ func (s *Service) RetryDeviceCall(ctx context.Context, callID int64) (*DeviceCal
 		}
 		if status == "success" {
 			return &domain.APIError{Code: domain.CodeTerminalState, Message: "device call already succeeded"}
+		}
+		// A failed call can only be retried once its scheduled logical retry
+		// time has arrived; the last attempt's next_retry is the gate.
+		last, err := tx.GetDeviceAttempt(ctx, callID, attempts)
+		if err != nil {
+			if store.IsNotFound(err) {
+				return &domain.APIError{Code: domain.CodeDeviceRetryPending, Message: "device call has no recorded attempt to retry"}
+			}
+			return err
+		}
+		if tx.Now() < domain.LogicalTime(last.NextRetry) {
+			return &domain.APIError{Code: domain.CodeDeviceRetryPending, Message: "device retry time has not arrived"}
 		}
 		return nil
 	})
