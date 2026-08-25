@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.25.6 AS benzhi-build
+FROM golang:1.25.6 AS benzhi-build
 ARG TARGETOS=linux
 ARG TARGETARCH
 ARG GOPROXY=https://goproxy.cn,direct
