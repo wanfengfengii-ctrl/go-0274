@@ -140,14 +140,26 @@ func (t *Tx) GetDeviceCall(ctx context.Context, taskID domain.TaskID, kind, hole
 	return &r, nil
 }
 
-// ListPendingDeviceCalls returns failed device calls whose next retry time has
-// arrived. This drives the restart recovery scanner.
+// ListPendingDeviceCalls returns device calls that are persisted but not yet
+// complete, so the restart recovery scanner can re-drive them. It covers two
+// crash outcomes:
+//   - a call left "pending" by a crash between persisting the call and its
+//     first device attempt: it never ran, has no attempts, and is driven
+//     immediately, and
+//   - a "failed" call whose most recent retry time — scheduled by its last
+//     failed attempt — has arrived.
+//
+// Once a call reaches "success" it is terminal and excluded, so recovery
+// resumes a crashed call exactly once without duplicating evidence.
 func (t *Tx) ListPendingDeviceCalls(ctx context.Context, now int64) ([]DeviceCallRecord, error) {
 	rows, err := t.QueryContext(ctx, `
-		SELECT DISTINCT dc.id, dc.task_id, dc.kind, dc.hole, dc.generation, dc.status, dc.attempts
+		SELECT dc.id, dc.task_id, dc.kind, dc.hole, dc.generation, dc.status, dc.attempts
 		FROM device_calls dc
-		JOIN device_attempts da ON da.call_id = dc.id
-		WHERE dc.status = 'failed' AND da.next_retry <= ?
+		WHERE dc.status = 'pending'
+		   OR (dc.status = 'failed'
+		       AND COALESCE((
+		           SELECT MAX(da.next_retry) FROM device_attempts da WHERE da.call_id = dc.id
+		       ), 0) <= ?)
 		ORDER BY dc.id`, now)
 	if err != nil {
 		return nil, err
