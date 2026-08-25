@@ -95,14 +95,17 @@ func (s *Service) runDeviceCall(ctx context.Context, callID int64, attempt int) 
 		return nil, err
 	}
 
-	// Run the instrument outside any transaction.
+	// Run the instrument outside any transaction, but bound to the caller's
+	// context so cancelling the request also aborts the in-flight device call.
+	// A detached context.Background() would keep the instrument running after
+	// the client gave up, holding the hole over a retried call on the same hole.
 	req := adjudication.DeviceRequest{
 		Kind:       adjudication.DeviceKind(kind),
 		Hole:       hole,
 		Generation: domain.Generation(generation),
 		Attempt:    attempt,
 	}
-	payload, category, callErr := s.runner.Call(context.Background(), req)
+	payload, category, callErr := s.runner.Call(ctx, req)
 
 	resp := &DeviceCallResponse{CallID: callID, Hole: hole, Kind: kind}
 	err = s.store.Tx(ctx, func(tx *store.Tx) error {
