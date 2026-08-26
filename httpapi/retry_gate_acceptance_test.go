@@ -17,14 +17,21 @@ import (
 	"oyster-purification-release-gate/store"
 )
 
+type modelClock struct {
+	now domain.LogicalTime
+}
+
+func (c *modelClock) Now() domain.LogicalTime        { return c.now }
+func (c *modelClock) SetTime(now domain.LogicalTime) { c.now = now }
+
 func TestModel_DeviceRetryTimeGate(t *testing.T) {
 	tests := []struct {
 		name  string
-		drive func(*testing.T, *service.Service, http.Handler, *domain.SteppingClock, int64)
+		drive func(*testing.T, *service.Service, http.Handler, *modelClock, int64)
 	}{
 		{
 			name: "manual retry endpoint",
-			drive: func(t *testing.T, svc *service.Service, handler http.Handler, clock *domain.SteppingClock, callID int64) {
+			drive: func(t *testing.T, svc *service.Service, handler http.Handler, clock *modelClock, callID int64) {
 				early := httptest.NewRecorder()
 				handler.ServeHTTP(early, httptest.NewRequest(http.MethodPost, fmt.Sprintf("/v1/device-calls/%d/retry", callID), nil))
 				if early.Code != http.StatusConflict {
@@ -50,7 +57,7 @@ func TestModel_DeviceRetryTimeGate(t *testing.T) {
 		},
 		{
 			name: "recovery scanner",
-			drive: func(t *testing.T, svc *service.Service, _ http.Handler, _ *domain.SteppingClock, _ int64) {
+			drive: func(t *testing.T, svc *service.Service, _ http.Handler, _ *modelClock, _ int64) {
 				if driven, err := svc.Recover(context.Background(), 0); err != nil || driven != 0 {
 					t.Fatalf("early Recover = (%d, %v), want (0, nil)", driven, err)
 				}
@@ -64,7 +71,7 @@ func TestModel_DeviceRetryTimeGate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			clock := domain.NewSteppingClock(0, 1)
+			clock := &modelClock{}
 			st, err := store.Open(ctx, ":memory:", clock)
 			if err != nil {
 				t.Fatalf("open store: %v", err)
